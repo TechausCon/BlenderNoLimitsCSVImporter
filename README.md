@@ -30,3 +30,9 @@ A small blender Add-on that allows to import track data from the NoLimits 2 Roll
 ![](docs/blender-import.jpg?raw=True)
 
 * Navigate to the exported file using blender's file browser. Select and confirm importing that file.
+
+## Exporting
+* Select a curve object in Blender.
+* Go to *File > Export > NoLimits 2 Professional Track Data (.csv)*.
+* Choose a filename and adjust export settings (Scale, Point Count) if necessary.
+* The generated CSV file can be imported back into NoLimits 2 using the *Import Track Spline* function in the Professional tab.
