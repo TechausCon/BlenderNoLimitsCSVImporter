@@ -5,6 +5,7 @@ import pathlib
 import logging
 from typing import List, Dict, Any, Tuple
 
+import math
 import bpy
 import mathutils
 from bpy.props import StringProperty, IntProperty, BoolProperty
@@ -95,41 +96,74 @@ def create_tmp_reader(context: Context, target_object: Object):
     return constraint, reader
 
 
-def apply_tilt_values(context: Context, vertices: List[Dict[str, mathutils.Vector]], target_object: Object, spline_points):
-    point_count = len(vertices)
-    if point_count == 0:
+def apply_tilt_values(vertices: List[Dict[str, mathutils.Vector]], spline_points):
+    """
+    Calculates and applies tilt angles for each vertex to align the curve normal
+    with the expected up vector.
+    This replaces the slow method of using a Follow Path constraint and scene updates.
+    """
+    if not vertices:
         return
 
-    largest_index = point_count - 1
-    if largest_index == 0:
-        # Avoid division by zero if only 1 point
-        largest_index = 1
+    points = [TO_BLENDER_COORDINATES @ v['pos'] for v in vertices]
+    target_ups = [TO_BLENDER_COORDINATES @ v['up'] for v in vertices]
+    count = len(points)
 
-    constraint, reader = create_tmp_reader(context, target_object)
+    # Calculate geometric tangents for the Poly Spline
+    tangents = []
+    for i in range(count - 1):
+        diff = points[i+1] - points[i]
+        if diff.length_squared > 0:
+            tangents.append(diff.normalized())
+        else:
+            # Use previous tangent or Z up if first
+            tangents.append(mathutils.Vector((0, 0, 1)) if i == 0 else tangents[-1])
 
-    for i in range(point_count):
-        constraint.offset_factor = i / largest_index
+    if count > 1:
+        tangents.append(tangents[-1])
+    else:
+        tangents.append(mathutils.Vector((0, 0, 1)))
 
-        dg = bpy.context.evaluated_depsgraph_get()
-        bpy.context.scene.frame_current = 1
+    # Initialize Minimum Twist Normal (Default Blender Behavior)
+    current_tangent = tangents[0]
+    up_vec = mathutils.Vector((0, 0, 1))
+    if abs(current_tangent.z) > 0.9999: # Parallel to Z
+        up_vec = mathutils.Vector((1, 0, 0))
 
-        eval_reader = reader.evaluated_get(dg)
-        matrix = eval_reader.matrix_world.copy()
+    # Calculate initial normal perpendicular to tangent
+    normal = current_tangent.cross(up_vec).cross(current_tangent).normalized()
 
-        evaluated_up = matrix.col[2].xyz
-        expected_up = TO_BLENDER_COORDINATES @ vertices[i]['up']
-        expected_forward = TO_BLENDER_COORDINATES @ vertices[i]['front']
+    for i in range(count):
+        t_curr = tangents[i]
 
-        calculated_forward = evaluated_up.cross(expected_up)
-        forward_direction = calculated_forward @ expected_forward
+        if i > 0:
+            t_prev = tangents[i-1]
+            # Transport normal from prev to curr (Minimum Twist)
+            if t_prev.dot(t_curr) < 0.999999:
+                quat = t_prev.rotation_difference(t_curr)
+                normal = quat @ normal
 
-        tilt_angle = expected_up.angle(evaluated_up)
-        if forward_direction < 0:
-            tilt_angle *= -1
+        # normal is now the "un-tilted" Blender normal
+        target_up = target_ups[i]
 
-        spline_points[i].tilt = tilt_angle
+        # Project target_up onto the plane perpendicular to t_curr
+        target_up_proj = target_up - (target_up.dot(t_curr)) * t_curr
+        if target_up_proj.length_squared > 0:
+            target_up_proj.normalize()
+        else:
+            target_up_proj = normal
 
-    bpy.data.objects.remove(reader, do_unlink=True)
+        # Calculate angle between 'normal' and 'target_up_proj'
+        dot = normal.dot(target_up_proj)
+        dot = max(-1.0, min(1.0, dot))
+        angle = math.acos(dot)
+
+        # Determine sign using cross product relative to tangent
+        cross = normal.cross(target_up_proj)
+        if cross.dot(t_curr) < 0:
+            angle = -angle
+
+        spline_points[i].tilt = angle
 
 
 def create_empties(context: Context, name: str, vertices: List[Dict[str, mathutils.Vector]], parent_object: Object):
@@ -183,7 +217,7 @@ def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool
         create_empties(context, name + " Raw", vertices, curve_object)
 
     context.scene.collection.objects.link(curve_object)
-    apply_tilt_values(context, vertices, curve_object, spline.points)
+    apply_tilt_values(vertices, spline.points)
 
     return {'FINISHED'}
 
