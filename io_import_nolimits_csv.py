@@ -1,5 +1,18 @@
 # <pep8 compliant>
 from contextvars import Token
+import csv
+import pathlib
+import logging
+from typing import List, Dict, Any, Tuple
+
+import bpy
+import mathutils
+from bpy.props import StringProperty, IntProperty, BoolProperty
+from bpy.types import Operator, Context, Object, Spline
+from bpy_extras.io_utils import ImportHelper, ExportHelper
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 TOOL_NAME = "NoLimits 2 Professional Track Data (.csv)"
 
@@ -15,15 +28,6 @@ bl_info = {
     "category": "Import-Export"
 }
 
-import csv
-import pathlib
-
-import bpy
-import mathutils
-from bpy.props import StringProperty, IntProperty, BoolProperty
-from bpy.types import Operator
-from bpy_extras.io_utils import ImportHelper, ExportHelper
-
 TO_BLENDER_COORDINATES = mathutils.Matrix(
     ((1.0, 0.0, 0.0),
      (0.0, 0.0, -1.0),
@@ -31,13 +35,22 @@ TO_BLENDER_COORDINATES = mathutils.Matrix(
 )
 
 
-def get_vertices_from_csv(file_path):
+def get_vertices_from_csv(file_path: pathlib.Path) -> List[Dict[str, mathutils.Vector]]:
     vertices = []
 
-    with open(file_path, 'r') as csv_file:
+    with open(file_path, 'r', newline='', encoding='utf-8') as csv_file:
         treader = csv.reader(csv_file, delimiter='\t', quotechar='|')
-        for row in treader:
+        for line_num, row in enumerate(treader, start=1):
+            if not row:
+                continue
             try:
+                # Ensure we have enough columns. The file format seems to expect at least 13 columns (indices 0 to 12)
+                # No. (0), PosX (1), PosY (2), PosZ (3), FrontX (4), FrontY (5), FrontZ (6),
+                # LeftX (7), LeftY (8), LeftZ (9), UpX (10), UpY (11), UpZ (12)
+                if len(row) < 13:
+                    # Skip header or malformed lines silently or log debug
+                    continue
+
                 vertices.append(
                     {
                         'pos': mathutils.Vector(
@@ -55,18 +68,23 @@ def get_vertices_from_csv(file_path):
                     }
                 )
             except ValueError:
+                # Likely a header line or malformed number
+                logger.debug(f"Skipping line {line_num} in CSV: {row}")
+                continue
+            except IndexError:
+                logger.warning(f"Skipping line {line_num} in CSV due to missing columns: {row}")
                 continue
 
     return vertices
 
 
-def apply_vertex_positions(spline, vertices):
+def apply_vertex_positions(spline: Spline, vertices: List[Dict[str, mathutils.Vector]]):
     for i, vertex in enumerate(vertices):
         new_point = spline.points[i]
         new_point.co = (TO_BLENDER_COORDINATES @ vertex['pos']).to_4d()
 
 
-def create_tmp_reader(context, target_object):
+def create_tmp_reader(context: Context, target_object: Object):
     reader = bpy.data.objects.new('tmp_curve_reader', None)
     reader.empty_display_type = 'ARROWS'
     context.layer_collection.collection.objects.link(reader)
@@ -77,9 +95,15 @@ def create_tmp_reader(context, target_object):
     return constraint, reader
 
 
-def apply_tilt_values(context, vertices, target_object, spline_points):
+def apply_tilt_values(context: Context, vertices: List[Dict[str, mathutils.Vector]], target_object: Object, spline_points):
     point_count = len(vertices)
+    if point_count == 0:
+        return
+
     largest_index = point_count - 1
+    if largest_index == 0:
+        # Avoid division by zero if only 1 point
+        largest_index = 1
 
     constraint, reader = create_tmp_reader(context, target_object)
 
@@ -108,7 +132,7 @@ def apply_tilt_values(context, vertices, target_object, spline_points):
     bpy.data.objects.remove(reader, do_unlink=True)
 
 
-def create_empties(context, name: str, vertices, parent_object):
+def create_empties(context: Context, name: str, vertices: List[Dict[str, mathutils.Vector]], parent_object: Object):
     collection = bpy.data.collections.new(name)
     context.scene.collection.children.link(collection)
 
@@ -130,11 +154,16 @@ def create_empties(context, name: str, vertices, parent_object):
         collection.objects.link(obj)
 
 
-def add_curve_from_csv(context, file_path: str, import_raw_points: bool):
-    file_path = pathlib.Path(file_path)
-    name = file_path.stem
+def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool):
+    file_path_obj = pathlib.Path(file_path)
+    name = file_path_obj.stem
 
-    vertices = get_vertices_from_csv(file_path)
+    vertices = get_vertices_from_csv(file_path_obj)
+
+    if not vertices:
+        # Should we raise an error or just return?
+        # Returning FINISHED with a warning report might be better if invoked from operator
+        return {'CANCELLED'}
 
     curve_data = bpy.data.curves.new(name, 'CURVE')
     curve_data.twist_mode = 'MINIMUM'
@@ -159,15 +188,28 @@ def add_curve_from_csv(context, file_path: str, import_raw_points: bool):
     return {'FINISHED'}
 
 
-def sample_curve_as_csv(context, file_path, point_count):
-    file_path = pathlib.Path(file_path)
+def sample_curve_as_csv(context: Context, file_path: str, point_count: int):
+    file_path_obj = pathlib.Path(file_path)
     curve = context.active_object
     if not curve or curve.type != 'CURVE':
         return {'CANCELLED'}
 
-    point_count = len(curve.data.splines[0].points) if point_count == 0 \
-        else point_count
+    # Ensure point_count is valid
+    if point_count == 0:
+        if curve.data.splines:
+             point_count = len(curve.data.splines[0].points)
+        else:
+             point_count = 0
+
+    if point_count < 2:
+         # Need at least 2 points to define a path properly for this export
+         # or handle 1 point edge case
+         pass
+
     largest_index = point_count - 1
+    if largest_index <= 0:
+        largest_index = 1
+
     constraint, reader = create_tmp_reader(context, curve)
 
     matrices = []
@@ -197,7 +239,7 @@ def sample_curve_as_csv(context, file_path, point_count):
         )
 
     csv_content = '\n'.join(csv_rows)
-    with open(file_path.with_suffix('.csv'), 'w') as f:
+    with open(file_path_obj.with_suffix('.csv'), 'w') as f:
         f.write(csv_content)
 
     return {'FINISHED'}
