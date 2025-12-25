@@ -91,13 +91,14 @@ class MockVector:
         # dot product or matrix multiplication
         return 0.0
 
+    def __neg__(self):
+        return MockVector([-x for x in self._data])
+
 class MockMatrix:
     def __init__(self, rows=None):
         self.rows = rows
-        self.col = [MagicMock() for _ in range(4)]
-        # Make col access return a MockVector-like object with xyz
-        for c in self.col:
-            c.xyz = MockVector([0.0, 0.0, 0.0])
+        # Initialize columns as MockVectors instead of MagicMocks to support -operator
+        self.col = [MockVector([0.0, 0.0, 0.0]) for _ in range(4)]
 
     def __matmul__(self, other):
         if isinstance(other, MockVector):

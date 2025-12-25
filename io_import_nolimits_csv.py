@@ -288,10 +288,13 @@ def sample_curve_as_csv(context: Context, file_path: str, point_count: int, scal
     for i, m in enumerate(matrices):
         pos = m.col[3] * scale
         up = m.col[2]
+        front = m.col[1]
+        left = -m.col[0]  # Blender X is Right, so -X is Left
         csv_rows.append(
             f'{i + 1}\t{pos.x}\t{pos.z}\t{-pos.y}'
-            f'\t0.0\t0.0\t0.0\t0.0\t0.0\t0.0\t'
-            f'{up.x}\t{up.z}\t{-up.y}'
+            f'\t{front.x}\t{front.z}\t{-front.y}'
+            f'\t{left.x}\t{left.z}\t{-left.y}'
+            f'\t{up.x}\t{up.z}\t{-up.y}'
         )
 
     csv_content = '\n'.join(csv_rows)
