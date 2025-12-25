@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Tuple
 import math
 import bpy
 import mathutils
-from bpy.props import StringProperty, IntProperty, BoolProperty
+from bpy.props import StringProperty, IntProperty, BoolProperty, FloatProperty
 from bpy.types import Operator, Context, Object, Spline
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
@@ -79,10 +79,11 @@ def get_vertices_from_csv(file_path: pathlib.Path) -> List[Dict[str, mathutils.V
     return vertices
 
 
-def apply_vertex_positions(spline: Spline, vertices: List[Dict[str, mathutils.Vector]]):
+def apply_vertex_positions(spline: Spline, vertices: List[Dict[str, mathutils.Vector]], scale: float):
     for i, vertex in enumerate(vertices):
         new_point = spline.points[i]
-        new_point.co = (TO_BLENDER_COORDINATES @ vertex['pos']).to_4d()
+        pos = vertex['pos'] * scale
+        new_point.co = (TO_BLENDER_COORDINATES @ pos).to_4d()
 
 
 def create_tmp_reader(context: Context, target_object: Object):
@@ -166,7 +167,7 @@ def apply_tilt_values(vertices: List[Dict[str, mathutils.Vector]], spline_points
         spline_points[i].tilt = angle
 
 
-def create_empties(context: Context, name: str, vertices: List[Dict[str, mathutils.Vector]], parent_object: Object):
+def create_empties(context: Context, name: str, vertices: List[Dict[str, mathutils.Vector]], parent_object: Object, scale: float):
     collection = bpy.data.collections.new(name)
     context.scene.collection.children.link(collection)
 
@@ -180,15 +181,16 @@ def create_empties(context: Context, name: str, vertices: List[Dict[str, mathuti
         matrix_nl2.col[2] = vertex['front']
 
         matrix_blender = (TO_BLENDER_COORDINATES @ matrix_nl2).to_4x4()
-        matrix_blender.col[3] = (
-                TO_BLENDER_COORDINATES @ vertex['pos']).to_4d()
+
+        pos = vertex['pos'] * scale
+        matrix_blender.col[3] = (TO_BLENDER_COORDINATES @ pos).to_4d()
 
         obj.matrix_world = matrix_blender
 
         collection.objects.link(obj)
 
 
-def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool):
+def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool, scale: float, simplification_distance: float = 0.0):
     file_path_obj = pathlib.Path(file_path)
     name = file_path_obj.stem
 
@@ -199,6 +201,26 @@ def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool
         # Returning FINISHED with a warning report might be better if invoked from operator
         return {'CANCELLED'}
 
+    if simplification_distance > 0:
+        simplified_vertices = []
+        if vertices:
+            prev_pos = None
+            for v in vertices:
+                if prev_pos is None:
+                    simplified_vertices.append(v)
+                    prev_pos = v['pos']
+                else:
+                    dist = (v['pos'] - prev_pos).length
+                    if dist >= simplification_distance:
+                        simplified_vertices.append(v)
+                        prev_pos = v['pos']
+
+            # Ensure last point is always included
+            if vertices[-1] is not simplified_vertices[-1]:
+                 simplified_vertices.append(vertices[-1])
+
+            vertices = simplified_vertices
+
     curve_data = bpy.data.curves.new(name, 'CURVE')
     curve_data.twist_mode = 'MINIMUM'
     curve_data.dimensions = '3D'
@@ -208,13 +230,13 @@ def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool
     spline.tilt_interpolation = 'LINEAR'
     spline.points.add(len(vertices) - 1)
 
-    apply_vertex_positions(spline, vertices)
+    apply_vertex_positions(spline, vertices, scale)
 
     curve_object = bpy.data.objects.new(name + " Object", curve_data)
     curve_object.location = (0, 0, 0)
 
     if import_raw_points:
-        create_empties(context, name + " Raw", vertices, curve_object)
+        create_empties(context, name + " Raw", vertices, curve_object, scale)
 
     context.scene.collection.objects.link(curve_object)
     apply_tilt_values(vertices, spline.points)
@@ -222,7 +244,7 @@ def add_curve_from_csv(context: Context, file_path: str, import_raw_points: bool
     return {'FINISHED'}
 
 
-def sample_curve_as_csv(context: Context, file_path: str, point_count: int):
+def sample_curve_as_csv(context: Context, file_path: str, point_count: int, scale: float):
     file_path_obj = pathlib.Path(file_path)
     curve = context.active_object
     if not curve or curve.type != 'CURVE':
@@ -264,7 +286,7 @@ def sample_curve_as_csv(context: Context, file_path: str, point_count: int):
 
     csv_rows = [csv_header]
     for i, m in enumerate(matrices):
-        pos = m.col[3]
+        pos = m.col[3] * scale
         up = m.col[2]
         csv_rows.append(
             f'{i + 1}\t{pos.x}\t{pos.z}\t{-pos.y}'
@@ -298,9 +320,22 @@ class ImportNl2Csv(Operator, ImportHelper):
         description="Imports the raw points as empties. Attention, this can take several minutes for many vertices!",
     )
 
+    scale: FloatProperty(
+        name="Scale",
+        default=1.0,
+        description="Scale factor for the imported track",
+    )
+
+    simplification_distance: FloatProperty(
+        name="Simplification Distance",
+        default=0.0,
+        min=0.0,
+        description="Minimum distance between points. Points closer than this will be merged.",
+    )
+
     def execute(self, context):
         return add_curve_from_csv(
-            context, self.filepath, self.import_raw_points
+            context, self.filepath, self.import_raw_points, self.scale, self.simplification_distance
         )
 
 
@@ -318,6 +353,12 @@ class ExportNl2Csv(Operator, ExportHelper):
         min=0,
     )
 
+    scale: FloatProperty(
+        name="Scale",
+        default=1.0,
+        description="Scale factor for the exported track",
+    )
+
     filter_glob: StringProperty(
         default="*.csv",
         options={'HIDDEN'},
@@ -325,7 +366,7 @@ class ExportNl2Csv(Operator, ExportHelper):
     )
 
     def execute(self, context):
-        result = sample_curve_as_csv(context, self.filepath, self.point_count)
+        result = sample_curve_as_csv(context, self.filepath, self.point_count, self.scale)
         if result != {'FINISHED'}:
             self.report(
                 {'ERROR_INVALID_CONTEXT'}, 'No valid curve object selected'

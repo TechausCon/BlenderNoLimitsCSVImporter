@@ -34,6 +34,59 @@ class MockVector:
     def angle(self, other):
         return 0.0
 
+    def __sub__(self, other):
+        return MockVector([a - b for a, b in zip(self._data, other._data)])
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float)):
+             return MockVector([a * other for a in self._data])
+        return 0.0
+
+    def __rmul__(self, other):
+        if isinstance(other, (int, float)):
+            return self.__mul__(other)
+        return 0.0
+
+    @property
+    def length(self):
+        return sum(x**2 for x in self._data) ** 0.5
+
+    @property
+    def length_squared(self):
+        return sum(x**2 for x in self._data)
+
+    def normalized(self):
+        l = self.length
+        if l == 0:
+            return MockVector([0.0]*len(self._data))
+        return MockVector([x/l for x in self._data])
+
+    def normalize(self):
+        l = self.length
+        if l != 0:
+            self._data = [x/l for x in self._data]
+        return None
+
+    def dot(self, other):
+        return sum(a * b for a, b in zip(self._data, other._data))
+
+    def cross(self, other):
+         # assuming 3d
+         x1, y1, z1 = self._data
+         x2, y2, z2 = other._data
+         return MockVector([
+             y1*z2 - z1*y2,
+             z1*x2 - x1*z2,
+             x1*y2 - y1*x2
+         ])
+
+    def rotation_difference(self, other):
+        # Return identity matrix mock or something that works with @ normal
+        # normal is a vector.
+        # quat @ normal -> vector
+        # let's return a MockMatrix that acts as identity for now
+        return MockMatrix()
+
     def __matmul__(self, other):
         # dot product or matrix multiplication
         return 0.0
@@ -48,8 +101,25 @@ class MockMatrix:
 
     def __matmul__(self, other):
         if isinstance(other, MockVector):
-            # Return a dummy vector result
+            # Very basic matrix vector multiplication mock
+            # If identity matrix-ish (TO_BLENDER_COORDINATES), we might want to approximate it?
+            # But here we don't know the content of self.rows easily unless we initialized it.
+
+            # If we know it is TO_BLENDER_COORDINATES:
+            # ((1.0, 0.0, 0.0),
+            #  (0.0, 0.0, -1.0),
+            #  (0.0, 1.0, 0.0))
+            # (x, y, z) -> (x, -z, y)
+
+            # Since we only use one matrix in the code essentially, we can hack it here or make it generic?
+            # Let's make it generic if we can.
+
+            if hasattr(self, '_is_to_blender') and self._is_to_blender:
+                 x, y, z = other.x, other.y, other.z
+                 return MockVector([x, -z, y])
+
             return MockVector([0.0]*len(other))
+
         if isinstance(other, MockMatrix):
             return MockMatrix()
         return self
@@ -65,7 +135,15 @@ class MockMatrix:
 
 mathutils = MagicMock()
 mathutils.Vector = MockVector
-mathutils.Matrix = MockMatrix
+
+# Helper to identify our matrix
+def MockMatrixConstructor(rows=None):
+    m = MockMatrix(rows)
+    if rows and len(rows) == 3 and rows[0][0] == 1.0 and rows[1][2] == -1.0:
+         m._is_to_blender = True
+    return m
+
+mathutils.Matrix = MockMatrixConstructor
 sys.modules['mathutils'] = mathutils
 
 # --- Mock bpy ---
